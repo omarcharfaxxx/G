@@ -596,6 +596,104 @@ def fetch_route():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/screenshot", methods=["POST"])
+def screenshot_route():
+    """Take a screenshot of any public webpage.
+
+    Body: { url: str, width?: int }
+    Response: { url, mime, data_b64 } | { error }
+    """
+    import base64
+    import requests as _rq
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    payload = payload or {}
+    url = (payload.get("url") or "").strip()
+    if not url:
+        return jsonify({"error": "missing 'url'"}), 400
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    try:
+        width = int(payload.get("width") or 1280)
+    except (TypeError, ValueError):
+        width = 1280
+
+    last_err = ""
+    candidates = [
+        f"https://image.thum.io/get/maxAge/12/png/width/{width}/{url}",
+        f"https://s0.wp.com/mshots/v1/{url}?w={width}",
+    ]
+    for api_url in candidates:
+        try:
+            r = _rq.get(api_url, timeout=45,
+                        headers={"User-Agent": "Mozilla/5.0 (Linux) ScreenshotBot"})
+            if r.status_code == 200 and r.content and len(r.content) > 2000:
+                mime = r.headers.get("Content-Type", "image/png").split(";")[0].strip()
+                if not mime.startswith("image/"):
+                    mime = "image/png"
+                return jsonify({
+                    "url": url,
+                    "mime": mime,
+                    "data_b64": base64.b64encode(r.content).decode("ascii"),
+                })
+            last_err = f"HTTP {r.status_code} (size={len(r.content) if r.content else 0})"
+        except Exception as e:
+            last_err = str(e)
+            continue
+    return jsonify({"error": f"screenshot service failed: {last_err}"}), 502
+
+
+@app.route("/deepsearch", methods=["POST"])
+def deepsearch_route():
+    """Multi-source deep web search: search + fetch top results.
+
+    Body: { query: str, num_pages?: int }
+    Response: { query, results: [...], pages: [{url, title, text}, ...] }
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    payload = request.get_json(silent=True) if request.is_json else request.form
+    payload = payload or {}
+    query = (payload.get("query") or "").strip()
+    if not query:
+        return jsonify({"error": "missing 'query'"}), 400
+    try:
+        num_pages = max(1, min(5, int(payload.get("num_pages") or 3)))
+    except (TypeError, ValueError):
+        num_pages = 3
+    try:
+        results = wt_search(query, max_results=8) or []
+    except Exception as e:
+        return jsonify({"error": f"search failed: {e}"}), 500
+
+    pages = []
+    top = [r for r in results if r.get("url")][:num_pages]
+
+    def _fetch_one(item):
+        try:
+            data = wt_fetch(item["url"], max_chars=3500)
+            return {
+                "url": item["url"],
+                "title": item.get("title") or data.get("title", ""),
+                "snippet": item.get("snippet", ""),
+                "text": data.get("text", ""),
+            }
+        except Exception as e:
+            return {
+                "url": item["url"],
+                "title": item.get("title", ""),
+                "snippet": item.get("snippet", ""),
+                "text": "",
+                "fetch_error": str(e),
+            }
+
+    if top:
+        with ThreadPoolExecutor(max_workers=min(3, len(top))) as ex:
+            futures = [ex.submit(_fetch_one, it) for it in top]
+            for f in as_completed(futures):
+                pages.append(f.result())
+
+    return jsonify({"query": query, "results": results, "pages": pages})
+
+
 @app.route("/pdfsearch", methods=["POST"])
 def pdfsearch_route():
     """Search the web for a PDF on `query`, return file + other sources.

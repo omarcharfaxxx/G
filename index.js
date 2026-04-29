@@ -381,6 +381,7 @@ function callProducesCaptionableAttachment(call) {
         case "apk":
         case "pdf":
         case "qr":
+        case "screenshot":
             return true;
         case "download":
             // Audio messages on WhatsApp cannot carry a caption, so we
@@ -555,6 +556,25 @@ async function executeToolCall(sock, msg, from, call, userCaption = null) {
                 return;
             }
             await performFetch(sock, msg, from, url);
+            return;
+        }
+        case "screenshot": {
+            const url = call.url || call.query || "";
+            if (!url) {
+                await safeSend(from, { text: "ما عطيتش لي رابط نديرو سكرين." }, { quoted: msg });
+                return;
+            }
+            const width = Number(call.width) || 1280;
+            await performScreenshot(sock, msg, from, url, width, userCaption);
+            return;
+        }
+        case "deepsearch": {
+            const query = call.query || call.q || "";
+            if (!query) {
+                await safeSend(from, { text: "ما عطيتش لي شي موضوع نبحث عليه عميق." }, { quoted: msg });
+                return;
+            }
+            await performDeepSearch(sock, msg, from, query);
             return;
         }
         case "pdf": {
@@ -914,6 +934,87 @@ async function performFetch(sock, msg, from, url) {
     } catch (err) {
         console.error("Fetch failed:", err.message);
         await safeSend(from, { text: `ما قدرتش نقرا الرابط: ${err.message}` }, { quoted: msg });
+    }
+}
+
+async function performScreenshot(sock, msg, from, url, width, userCaption = null) {
+    try {
+        await sock.sendPresenceUpdate("composing", from).catch(() => {});
+        const data = await callGemini(
+            "/screenshot",
+            { url, width },
+            null,
+            { retries: 1, retryDelayMs: 2000 }
+        );
+        if (!data.data_b64) {
+            await safeSend(
+                from,
+                { text: `ما قدرتش ناخد سكرين شوت ديال هاد الموقع.` },
+                { quoted: msg }
+            );
+            return;
+        }
+        const caption = (userCaption && userCaption.trim()) ||
+            `📸 سكرين شوت ديال ${data.url || url}`;
+        await safeSend(
+            from,
+            {
+                image: Buffer.from(data.data_b64, "base64"),
+                caption,
+            },
+            { quoted: msg }
+        );
+    } catch (err) {
+        console.error("Screenshot failed:", err.message);
+        await safeSend(
+            from,
+            { text: `ما قدرتش ناخد سكرين: ${err.message}` },
+            { quoted: msg }
+        );
+    }
+}
+
+async function performDeepSearch(sock, msg, from, query) {
+    try {
+        await sock.sendPresenceUpdate("composing", from).catch(() => {});
+        const data = await callGemini(
+            "/deepsearch",
+            { query, num_pages: 3 },
+            null,
+            { retries: 1, retryDelayMs: 2000 }
+        );
+        const results = data.results || [];
+        const pages = data.pages || [];
+        if (!results.length && !pages.length) {
+            await safeSend(from, { text: "ما لقيت تا نتيجة على هاد البحث العميق." }, { quoted: msg });
+            return;
+        }
+        const pagesBlock = pages.map((p, i) =>
+            `--- صفحة ${i + 1}: ${p.title || ""} (${p.url}) ---\n` +
+            (p.text || p.snippet || "(ما قدرتش نقرأها)").slice(0, 2500)
+        ).join("\n\n");
+        const otherBlock = results.slice(pages.length).map((r, i) =>
+            `${i + 1}. ${r.title}\n${r.url}\n${(r.snippet || "").slice(0, 200)}`
+        ).join("\n\n");
+        const prompt =
+            `[بحث عميق على "${query}"]\n\n` +
+            `قرأت لك ${pages.length} صفحات كاملة من أحسن النتائج. ها هي:\n\n` +
+            `${pagesBlock}\n\n` +
+            (otherBlock ? `[نتائج إضافية ما قراتهاش بالكامل]\n${otherBlock}\n\n` : "") +
+            `لخص هاد البحث العميق للمستخدم بشكل شامل ومركز بالدارجة، ` +
+            `جمع المعلومات من كل المصادر، ` +
+            `وحط في الأخير قائمة المصادر بالروابط الخام (بدون Markdown). ` +
+            `ما تستعملش أي أداة في الجواب.`;
+        const summary = await summarizeViaOmar(from, prompt);
+        if (summary) {
+            await safeSend(from, { text: summary }, { quoted: msg });
+        } else {
+            const fallback = pages.map((p) => `• ${p.title}\n${p.url}`).join("\n\n");
+            await safeSend(from, { text: fallback || "ما قدرتش نلخص النتائج." }, { quoted: msg });
+        }
+    } catch (err) {
+        console.error("Deep search failed:", err.message);
+        await safeSend(from, { text: `ما قدرتش ندير بحث عميق: ${err.message}` }, { quoted: msg });
     }
 }
 
@@ -1611,11 +1712,24 @@ async function startBot() {
         const file = await extractFile(msg);
         if (!text && !file) return;
 
+        // For audio-only messages, prepend a Darija system note so Omar
+        // replies as if hearing a friend (not summarizing/describing it).
+        let effectiveText = text;
+        if (!effectiveText && file && (file.mime || "").startsWith("audio/")) {
+            effectiveText =
+                "هاد المستخدم بعت لي رسالة صوتية بلا نص. استمع للأوديو " +
+                "وجاوب طبيعي بحال أنك صديق فمحادثة معه — رد على اللي قال " +
+                "(مثلاً إيلا قال 'السلام عليكم' جاوب 'وعليكم السلام'، " +
+                "إيلا سأل سؤال جاوبو مباشرة). ممنوع منعاً باتاً تلخص " +
+                "أو توصف الأوديو ('في التسجيل قال...'، 'محتوى التسجيل...'، " +
+                "'تأكيد...'). فقط رد طبيعي بحال محادثة WhatsApp عادية.";
+        }
+
         try {
             await sock.sendPresenceUpdate("composing", from).catch(() => {});
             const data = await callGemini(
                 "/ask",
-                { user: from, text },
+                { user: from, text: effectiveText },
                 file
             );
 
