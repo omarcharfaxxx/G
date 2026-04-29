@@ -24,22 +24,44 @@ const GEMINI_SERVER = process.env.GEMINI_SERVER || "http://127.0.0.1:5000";
 // Developer phone number — only this user can run /cookie commands.
 // Set via DEVELOPER_NUMBER env var (digits only, with country code).
 const DEVELOPER_NUMBER = (process.env.DEVELOPER_NUMBER || "212688898322").replace(/\D/g, "");
+// WhatsApp's new "Linked Identity" format hides the real phone number
+// behind a numeric LID (e.g. "187136791855332@lid"). Set DEVELOPER_LID
+// (comma-separated digits) to also recognize the developer by LID.
+const DEVELOPER_LIDS = (process.env.DEVELOPER_LID || "")
+    .split(",")
+    .map((s) => s.replace(/\D/g, ""))
+    .filter(Boolean);
 
 // Optional shared secret for /admin/* endpoints. When set both the bot
 // and the server must agree on the same value (server reads ADMIN_TOKEN).
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 
-function senderPhone(msg) {
-    if (!msg || !msg.key) return "";
-    if (msg.key.fromMe) return "";
+function senderIds(msg) {
+    if (!msg || !msg.key) return { phone: "", lid: "", senderPn: "" };
+    if (msg.key.fromMe) return { phone: "", lid: "", senderPn: "" };
     const jid = msg.key.participant || msg.key.remoteJid || "";
-    const ident = jid.split("@")[0] || "";
-    // Strip Baileys' device suffix (":12") and the LID ":@lid" tail.
-    return ident.split(":")[0].replace(/\D/g, "");
+    const ident = (jid.split("@")[0] || "").split(":")[0].replace(/\D/g, "");
+    const isLid = jid.endsWith("@lid");
+    // Baileys exposes the real phone for LID senders via msg.key.senderPn
+    const senderPn = (msg.key.senderPn || "").split("@")[0].split(":")[0].replace(/\D/g, "");
+    return {
+        phone: isLid ? senderPn : ident,
+        lid: isLid ? ident : "",
+        senderPn,
+    };
+}
+
+function senderPhone(msg) {
+    const ids = senderIds(msg);
+    return ids.phone || ids.senderPn || "";
 }
 
 function isDeveloper(msg) {
-    return senderPhone(msg) === DEVELOPER_NUMBER;
+    const ids = senderIds(msg);
+    if (ids.phone && ids.phone === DEVELOPER_NUMBER) return true;
+    if (ids.senderPn && ids.senderPn === DEVELOPER_NUMBER) return true;
+    if (ids.lid && DEVELOPER_LIDS.includes(ids.lid)) return true;
+    return false;
 }
 
 // Appended to every outgoing caption / text message
