@@ -19,22 +19,25 @@ if (!fs.existsSync(AUTH_DIR)) {
     fs.mkdirSync(AUTH_DIR, { recursive: true });
 }
 
-const GEMINI_SERVER = process.env.GEMINI_SERVER || "http://127.0.0.1:5000";
+// Load defaults from config.js; env vars (if set) take precedence.
+let fileConfig = {};
+try { fileConfig = require("./config.js"); }
+catch (e) { console.warn("[config] config.js not found, using env vars only"); }
+
+const GEMINI_SERVER = process.env.GEMINI_SERVER || fileConfig.GEMINI_SERVER || "http://127.0.0.1:5000";
 
 // Developer phone number — only this user can run /cookie commands.
-// Set via DEVELOPER_NUMBER env var (digits only, with country code).
-const DEVELOPER_NUMBER = (process.env.DEVELOPER_NUMBER || "212688898322").replace(/\D/g, "");
+const DEVELOPER_NUMBER = (process.env.DEVELOPER_NUMBER || fileConfig.DEVELOPER_NUMBER || "212688898322").replace(/\D/g, "");
 // WhatsApp's new "Linked Identity" format hides the real phone number
-// behind a numeric LID (e.g. "187136791855332@lid"). Set DEVELOPER_LID
-// (comma-separated digits) to also recognize the developer by LID.
-const DEVELOPER_LIDS = (process.env.DEVELOPER_LID || "")
+// behind a numeric LID (e.g. "187136791855332@lid"). Comma-separated digits.
+const DEVELOPER_LIDS = (process.env.DEVELOPER_LID || fileConfig.DEVELOPER_LID || "")
     .split(",")
     .map((s) => s.replace(/\D/g, ""))
     .filter(Boolean);
 
 // Optional shared secret for /admin/* endpoints. When set both the bot
 // and the server must agree on the same value (server reads ADMIN_TOKEN).
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || fileConfig.ADMIN_TOKEN || "";
 
 function senderIds(msg) {
     if (!msg || !msg.key) return { phone: "", lid: "", senderPn: "" };
@@ -1426,7 +1429,7 @@ async function startBot() {
     });
 
     if (!sock.authState.creds.registered) {
-        let phoneNumber = process.env.PHONE_NUMBER || "";
+        let phoneNumber = process.env.PHONE_NUMBER || fileConfig.PHONE_NUMBER || "";
 
         if (!phoneNumber) {
             // Only ask interactively when stdin is a real terminal (local dev)
