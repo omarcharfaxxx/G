@@ -26,15 +26,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- non-root user (Hugging Face requires UID 1000) ---------------------------
-# On HF Spaces, UID 1000 may already exist (different name); reuse it if so.
+# On HF Spaces, UID 1000 may already exist as a different name (e.g. "node").
+# Remove that user first, then create our own "user" with UID 1000.
 RUN if id -u 1000 >/dev/null 2>&1; then \
         existing=$(getent passwd 1000 | cut -d: -f1); \
-        if [ "$existing" != "user" ]; then usermod -l user "$existing"; fi; \
-        usermod -d /home/user -m user 2>/dev/null || mkdir -p /home/user; \
-        chown -R user:user /home/user; \
-    else \
-        useradd -m -u 1000 user; \
-    fi
+        userdel -r "$existing" 2>/dev/null || userdel "$existing" 2>/dev/null || true; \
+    fi && \
+    if getent group 1000 >/dev/null 2>&1; then \
+        existing_grp=$(getent group 1000 | cut -d: -f1); \
+        groupdel "$existing_grp" 2>/dev/null || true; \
+    fi && \
+    useradd -m -u 1000 user
 USER user
 ENV HOME=/home/user \
     PATH=/home/user/.local/bin:$PATH
